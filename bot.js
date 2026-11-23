@@ -70,6 +70,7 @@ async function me(chatId) {
 const mainMenu = (logged, admin) => kb([
   ...(admin ? [[{ text: '👑 لوحة الأدمن', callback_data: 'adm' }]] : []),
   [{ text: '🛒 المتجر / الخدمات', callback_data: 'shop' }],
+  [{ text: '📱 أرقام واتساب افتراضية', callback_data: 'nums' }],
   [{ text: '💰 رصيدي', callback_data: 'balance' }, { text: '📋 طلباتي', callback_data: 'orders' }],
   [{ text: '💳 شحن الرصيد', callback_data: 'topup' }, { text: '🎧 الدعم', callback_data: 'support' }],
   [{ text: '🌐 فتح الموقع داخل تليجرام', web_app: { url: SITE } }],
@@ -109,6 +110,31 @@ async function showService(chatId, msgId, id) {
     kb([[{ text: '🛍️ اطلب الآن', callback_data: 'buy:' + s.id }], [{ text: '⬅️ رجوع', callback_data: 'cat:' + s.category }]]));
 }
 
+async function showNumbers(chatId, msgId) {
+  const back = kb([[{ text: '🏠 الرئيسية', callback_data: 'home' }]]);
+  const r = await api('/api/numbers');
+  if (!r.ok || !Array.isArray(r.data.countries)) return edit(chatId, msgId, '⚠️ تعذّر تحميل قائمة الأرقام حالياً، حاول بعد قليل.', back);
+  const { countries, currency = 'ريال', contact } = r.data;
+  const u = await me(chatId);
+  const wa = (c) => {
+    const t = c
+      ? `السلام عليكم، أريد رقم واتساب افتراضي 📱\nالدولة: ${c.flag} ${c.name}\nالسعر: ${c.price ? c.price + ' ' + currency : 'أرجو إبلاغي بالسعر'}\nرقم عضويتي: ${u?.memberId || '-'}`
+      : `السلام عليكم، أريد الاستفسار عن أرقام واتساب افتراضية لدولة أخرى 📱\nرقم عضويتي: ${u?.memberId || '-'}`;
+    return `https://wa.me/${contact || SUPPORT_WA}?text=${encodeURIComponent(t)}`;
+  };
+  const priced = countries.filter(c => c.price);
+  const text = '📱 <b>أرقام واتساب افتراضية</b> 🇾🇪\n\n' +
+    '😎 تبغى رقم؟ وصلت صح!\n⚡ تسليم سريع | 🔥 دول متعددة | 💰 أسعار مناسبة\n\n' +
+    '💰 <b>قائمة الأسعار:</b>\n' + priced.map(c => `${c.flag} ${esc(c.name)}: <b>${c.price} ${esc(currency)}</b>`).join('\n') +
+    '\n\n✨ باقي الدول أسعارها تختلف حسب الدولة.\n\n👇 اختر الدولة وسيفتح لك الطلب في واتساب:';
+  const btns = countries.map(c => ({ text: `${c.flag} ${c.name}${c.price ? ' — ' + c.price : ''}`, url: wa(c) }));
+  const rows = [];
+  for (let i = 0; i < btns.length; i += 2) rows.push(btns.slice(i, i + 2));
+  rows.push([{ text: '🌐 دولة أخرى / استفسار', url: wa(null) }]);
+  rows.push([{ text: '🏠 الرئيسية', callback_data: 'home' }]);
+  return edit(chatId, msgId, text, kb(rows));
+}
+
 async function requireLogin(chatId) {
   const u = await me(chatId);
   if (!u) await send(chatId, '🔒 يجب تسجيل الدخول أولاً.', kb([[{ text: '🔑 تسجيل الدخول', callback_data: 'login' }, { text: '➕ حساب جديد', callback_data: 'register' }]]));
@@ -126,6 +152,7 @@ async function onCallback(q) {
   }
   if (d.startsWith('adm')) return onAdmin(chatId, msgId, d, s);
   if (d === 'home') { s.step = null; save(); return showHome(chatId, msgId); }
+  if (d === 'nums') return showNumbers(chatId, msgId);
   if (d === 'shop') return showCategories(chatId, msgId);
   if (d.startsWith('cat:')) return showCategory(chatId, msgId, d.slice(4));
   if (d.startsWith('svc:')) return showService(chatId, msgId, d.slice(4));
