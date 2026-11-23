@@ -46,9 +46,16 @@ async function getServices() {
 async function me(chatId) {
   const s = S(chatId);
   if (!s.token) return null;
-  const r = await api('/api/me', { token: s.token });
-  if (!r.ok) { delete s.token; save(); return null; }
-  return r.data;
+  // نحاول حتى 3 مرات، ولا نسجّل خروج المستخدم إلا إذا رفض الموقع التوكن فعلاً (401/403)
+  for (let i = 0; i < 3; i++) {
+    try {
+      const r = await api('/api/me', { token: s.token });
+      if (r.ok && r.data && r.data.email) { s.last = r.data; return r.data; }
+      if (r.status === 401 || r.status === 403) { delete s.token; delete s.last; save(); return null; }
+    } catch {}
+    await new Promise(res => setTimeout(res, 1500));
+  }
+  return s.last || null; // الموقع بطيء مؤقتاً: نستخدم آخر بيانات معروفة
 }
 
 // ---------- القوائم ----------
@@ -104,6 +111,11 @@ async function requireLogin(chatId) {
 async function onCallback(q) {
   const chatId = q.message.chat.id, msgId = q.message.message_id, d = q.data, s = S(chatId);
   tg('answerCallbackQuery', { callback_query_id: q.id });
+  if (d.startsWith('chat:close:')) {
+    const c = db.chats[d.slice(11)];
+    if (c && s.admin) { c.open = false; c.msgs.push({ from: 'admin', text: 'تم إغلاق المحادثة ✅ شكراً لتواصلك مع خدمات الملكي 👑', t: Date.now() }); save(); }
+    return tg('editMessageReplyMarkup', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } });
+  }
   if (d.startsWith('adm')) return onAdmin(chatId, msgId, d, s);
   if (d === 'home') { s.step = null; save(); return showHome(chatId, msgId); }
   if (d === 'shop') return showCategories(chatId, msgId);
@@ -149,9 +161,61 @@ async function onCallback(q) {
   if (d === 'cancel') { s.step = null; save(); return send(chatId, 'تم الإلغاء.', kb([[{ text: '🏠 الرئيسية', callback_data: 'home' }]])); }
 }
 
+
+// ================= دعم الموقع (نافذة الدردشة) =================
+db.chats ||= {}; db.map ||= {};
+const WIDGET = fs.readFileSync(path.join(__dirname, 'widget.js'), 'utf8');
+const admins = () => Object.entries(db).filter(([k, v]) => /^-?\d+$/.test(k) && v.admin && v.token).map(([k]) => k);
+const rate = {};
+
+async function autoReply(text, info) {
+  const t = text.replace(/[أإآ]/g, 'ا');
+  if (/سعر|اسعار|الاسعار|كم|خدمات|الخدمات/.test(t)) {
+    const list = await getServices();
+    return '💵 أسعار خدماتنا (لكل 1000):\n\n' + list.map(x => `• ${x.name}: ${x.price}$`).join('\n') + '\n\nتقدر تطلب مباشرة من صفحة "خدمات الرشق".';
+  }
+  if (/شحن|رصيد|ادفع|دفع|تحويل/.test(t))
+    return '💳 لشحن الرصيد: اكتب هنا المبلغ وطريقة الدفع التي تناسبك' + (info.memberId ? ` (رقم عضويتك ${info.memberId})` : '') + '، وسيرد عليك الأدمن هنا بتفاصيل التحويل ويُضاف الرصيد لحسابك بعد التأكيد.';
+  if (/طلب|طلبي|حاله|حالة|متى|تاخر|وصل/.test(t))
+    return '📋 تقدر تتابع حالة طلباتك من صفحة "طلباتي" في الموقع.\n🟡 قيد الانتظار ← 🔵 جاري التنفيذ ← 🟢 مكتمل.\nإذا تأخر طلبك اكتب رابط الطلب هنا وسيراجعه الأدمن.';
+  return null;
+}
+
+async function chatIncoming(b) {
+  const cid = String(b.cid || '').slice(0, 40), text = String(b.text || '').trim().slice(0, 1000);
+  if (!/^c[a-z0-9]+$/.test(cid) || !text) return { ok: false };
+  const now = Date.now(); const r = (rate[cid] = (rate[cid] || []).filter(x => now - x < 60000)); if (r.length >= 15) return { ok: false };
+  r.push(now);
+  const c = (db.chats[cid] ||= { msgs: [], open: true });
+  Object.assign(c, { name: String(b.name || 'زائر').slice(0, 60), email: b.email || c.email, memberId: b.memberId || c.memberId, open: true });
+  c.msgs.push({ from: 'user', text, t: now });
+  const wantsHuman = /دعم|ادمن|أدمن|موظف|شخص|التحدث/.test(text);
+  const auto = wantsHuman ? null : await autoReply(text, c);
+  if (auto) c.msgs.push({ from: 'bot', text: auto, t: now + 1 });
+  else if (!c.ackAt || now - c.ackAt > 10 * 60000) { c.ackAt = now; c.msgs.push({ from: 'bot', text: '✅ وصلت رسالتك للدعم الفني، وسيتم الرد عليك هنا خلال دقائق. خليك في الصفحة 🌟', t: now + 1 }); }
+  c.msgs = c.msgs.slice(-100);
+  const head = `💬 <b>استفسار من الموقع</b>${auto ? ' (تم الرد آلياً)' : ''}\n👤 ${esc(c.name)}${c.email ? ' — ' + esc(c.email) : ''}${c.memberId ? ' — ' + esc(c.memberId) : ''}\n\n${esc(text)}\n\n↩️ <i>اضغط "رد" على هذه الرسالة لترد على العميل داخل الموقع</i>`;
+  for (const a of admins()) {
+    const m = await tg('sendMessage', { chat_id: a, text: head, parse_mode: 'HTML', ...kb([[{ text: '✅ إغلاق المحادثة', callback_data: 'chat:close:' + cid }]]) });
+    if (m?.message_id) db.map[a + ':' + m.message_id] = cid;
+  }
+  const keys = Object.keys(db.map); if (keys.length > 3000) for (const k of keys.slice(0, 1000)) delete db.map[k];
+  save();
+  return { ok: true };
+}
+
+async function adminReply(m) {
+  const cid = db.map[m.chat.id + ':' + m.reply_to_message.message_id];
+  if (!cid || !db.chats[cid]) return false;
+  db.chats[cid].msgs.push({ from: 'admin', text: m.text.slice(0, 2000), t: Date.now() }); save();
+  await send(m.chat.id, '✅ تم إرسال ردك للعميل داخل الموقع.');
+  return true;
+}
+
 // ---------- الرسائل النصية ----------
 async function onMessage(m) {
   const chatId = m.chat.id, text = (m.text || '').trim(), s = S(chatId);
+  if (m.reply_to_message && m.text && await adminReply(m)) return;
   if (text === '/start' || text === '/menu') { s.step = null; save(); return showHome(chatId); }
   if (text === '/shop') return send(chatId, '🛒', kb([[{ text: 'افتح المتجر', callback_data: 'shop' }]]));
   const step = s.step || '';
@@ -209,6 +273,7 @@ const admMenu = kb([
   [{ text: '📥 الطلبات النشطة', callback_data: 'adm:orders' }],
   [{ text: '➕ إضافة منتج', callback_data: 'adm:addp' }, { text: '🗑️ حذف منتج', callback_data: 'adm:delp' }],
   [{ text: '💵 شحن رصيد مستخدم', callback_data: 'adm:bal' }, { text: '👥 المستخدمين', callback_data: 'adm:users' }],
+  [{ text: '💬 محادثات الموقع المفتوحة', callback_data: 'adm:chats' }],
   [{ text: '🌐 لوحة الأدمن في الموقع', web_app: { url: SITE + '/admin.html' } }],
   [{ text: '🏠 الرئيسية', callback_data: 'home' }],
 ]);
@@ -230,6 +295,16 @@ async function onAdmin(chatId, msgId, d, s) {
     const [, , status, orderId] = d.split(':');
     const r = await api('/api/admin/order-status', { method: 'POST', token: tok, body: { orderId, status } });
     return edit(chatId, msgId, (r.ok ? '✅ ' : '❌ ') + esc(r.data.message || '') + `\nالحالة الجديدة: ${ST[status] || status}`);
+  }
+  if (d === 'adm:chats') {
+    const open = Object.entries(db.chats || {}).filter(([, c]) => c.open).slice(-15);
+    if (!open.length) return send(chatId, '✅ لا توجد محادثات مفتوحة.', admMenu);
+    for (const [cid, c] of open) {
+      const last = c.msgs.slice(-4).map(x => (x.from === 'user' ? '👤 ' : x.from === 'admin' ? '👑 ' : '🤖 ') + esc(x.text.slice(0, 200))).join('\n');
+      const m = await send(chatId, `💬 <b>${esc(c.name)}</b>${c.email ? ' — ' + esc(c.email) : ''}\n\n${last}\n\n↩️ <i>رد على هذه الرسالة للرد على العميل</i>`, kb([[{ text: '✅ إغلاق المحادثة', callback_data: 'chat:close:' + cid }]]));
+      if (m?.message_id) db.map[chatId + ':' + m.message_id] = cid;
+    }
+    return save();
   }
   if (d === 'adm:users') {
     const r = await api('/api/admin/users', { token: tok });
@@ -318,6 +393,22 @@ http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === HOOK_PATH) {
     let b = ''; req.on('data', c => b += c);
     req.on('end', () => { res.end('ok'); try { handle(JSON.parse(b)); } catch {} });
+  } else if (req.url === '/widget.js') {
+    res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=300' });
+    res.end(WIDGET);
+  } else if (req.url.startsWith('/chat/')) {
+    const H = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS' };
+    if (req.method === 'OPTIONS') { res.writeHead(204, H); return res.end(); }
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname === '/chat/poll') {
+      const c = db.chats[u.searchParams.get('cid')]; const since = Number(u.searchParams.get('since') || 0);
+      res.writeHead(200, H); return res.end(JSON.stringify({ msgs: c ? c.msgs.filter(x => x.t > since) : [] }));
+    }
+    if (u.pathname === '/chat/send' && req.method === 'POST') {
+      let b = ''; req.on('data', c => { b += c; if (b.length > 5000) req.destroy(); });
+      return req.on('end', async () => { let out = { ok: false }; try { out = await chatIncoming(JSON.parse(b)); } catch {} res.writeHead(200, H); res.end(JSON.stringify(out)); });
+    }
+    res.writeHead(404, H); res.end('{}');
   } else res.end('Malaki bot is running 👑');
 }).listen(PORT, async () => {
   await tg('setMyCommands', { commands: [{ command: 'start', description: 'القائمة الرئيسية' }, { command: 'shop', description: 'المتجر' }] });
@@ -325,6 +416,8 @@ http.createServer((req, res) => {
   if (PUBLIC_URL) {
     await tg('setWebhook', { url: PUBLIC_URL.replace(/\/$/, '') + HOOK_PATH, drop_pending_updates: true });
     console.log('✅ البوت يعمل (Webhook) على', PUBLIC_URL);
+    // إبقاء البوت والموقع مستيقظين (Render المجاني ينام بعد 15 دقيقة ويمسح الجلسات)
+    setInterval(() => { fetch(PUBLIC_URL).catch(() => {}); fetch(SITE + '/api/services').catch(() => {}); }, 10 * 60 * 1000);
   } else {
     await tg('deleteWebhook', {});
     console.log('✅ البوت يعمل (Polling)');
