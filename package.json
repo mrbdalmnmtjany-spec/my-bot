@@ -1,0 +1,8 @@
+{
+  "name": "malaki-telegram-bot",
+  "version": "1.0.0",
+  "description": "بوت تليجرام متجر خدمات الملكي للرشق",
+  "main": "bot.js",
+  "scripts": { "start": "node bot.js" },
+  "engines": { "node": ">=18" }
+}
