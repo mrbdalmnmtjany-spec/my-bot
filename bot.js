@@ -36,6 +36,14 @@ const edit = (chat_id, message_id, text, extra = {}) => tg('editMessageText', { 
 const esc = (s) => String(s ?? '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 const kb = (rows) => ({ reply_markup: { inline_keyboard: rows } });
 
+// أسماء الأقسام بالعربي (أي قسم غير موجود هنا يظهر باسمه كما هو)
+const CAT_AR = {
+  TikTok: 'تيك توك 🎵', Instagram: 'انستقرام 📸', YouTube: 'يوتيوب ▶️', Telegram: 'تلجرام ✈️',
+  Facebook: 'فيسبوك 👍', WhatsApp: 'قنوات واتساب 💬', Polls: 'تصويتات 🗳️', Survey: 'استطلاعات الرأي 📝',
+  Twitter: 'تويتر 🐦', X: 'إكس 🐦', Snapchat: 'سناب شات 👻',
+};
+const catName = (c) => CAT_AR[c] || c;
+
 let servicesCache = { at: 0, list: [] };
 async function getServices() {
   if (Date.now() - servicesCache.at < 60000 && servicesCache.list.length) return servicesCache.list;
@@ -83,7 +91,7 @@ async function showCategories(chatId, msgId) {
   const list = await getServices();
   const cats = [...new Set(list.map(s => s.category))];
   const rows = [];
-  for (let i = 0; i < cats.length; i += 2) rows.push(cats.slice(i, i + 2).map(c => ({ text: c, callback_data: 'cat:' + c })));
+  for (let i = 0; i < cats.length; i += 2) rows.push(cats.slice(i, i + 2).map(c => ({ text: catName(c), callback_data: 'cat:' + c })));
   rows.push([{ text: '⬅️ رجوع', callback_data: 'home' }]);
   return edit(chatId, msgId, '🛒 <b>اختر القسم:</b>', kb(rows));
 }
@@ -91,7 +99,7 @@ async function showCategory(chatId, msgId, cat) {
   const list = (await getServices()).filter(s => s.category === cat);
   const rows = list.map(s => [{ text: `${s.name} — ${s.price}$/1000`, callback_data: 'svc:' + s.id }]);
   rows.push([{ text: '⬅️ الأقسام', callback_data: 'shop' }]);
-  return edit(chatId, msgId, `📂 <b>${esc(cat)}</b>`, kb(rows));
+  return edit(chatId, msgId, `📂 <b>${esc(catName(cat))}</b>`, kb(rows));
 }
 async function showService(chatId, msgId, id) {
   const s = (await getServices()).find(x => x.id === id);
@@ -149,7 +157,8 @@ async function onCallback(q) {
   if (d.startsWith('buy:')) {
     const u = await requireLogin(chatId); if (!u) return;
     s.step = 'order:link'; s.tmp = { serviceId: d.slice(4) }; save();
-    return send(chatId, '🔗 أرسل رابط الحساب أو المنشور/الفيديو:');
+    const sv0 = (await getServices()).find(x => x.id === d.slice(4));
+    return send(chatId, '🔗 أرسل ' + esc(sv0?.linkHint || 'رابط الحساب أو المنشور/الفيديو') + ':');
   }
   if (d === 'confirm' && s.step === 'order:confirm') {
     const { serviceId, link, quantity } = s.tmp; s.step = null; save();
@@ -361,7 +370,7 @@ async function onAdminText(chatId, text, s) {
   if (flow[i][1]) { s.step = 'adm:p:' + flow[i + 1][0]; save(); return send(chatId, flow[i][1]); }
   t.id = (t.category + '_' + Date.now().toString(36)).toLowerCase().replace(/[^a-z0-9_]/g, '');
   s.step = 'adm:p:confirm'; save();
-  return send(chatId, `🧾 <b>مراجعة المنتج</b>\n\nالاسم: ${esc(t.name)}\nالقسم: ${esc(t.category)}\nالسعر: ${t.price}$ / 1000\nالكمية: ${t.min} - ${t.max}\nالوصف: ${esc(t.desc)}`,
+  return send(chatId, `🧾 <b>مراجعة المنتج</b>\n\nالاسم: ${esc(t.name)}\nالقسم: ${esc(catName(t.category))}\nالسعر: ${t.price}$ / 1000\nالكمية: ${t.min} - ${t.max}\nالوصف: ${esc(t.desc)}`,
     kb([[{ text: '✅ نشر المنتج', callback_data: 'adm:pok' }, { text: '❌ إلغاء', callback_data: 'cancel' }]]));
 }
 
